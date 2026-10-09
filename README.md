@@ -25,8 +25,8 @@ FeedReadiness turns each of these into an explicit component, and each component
 
 The hard decisions here are not about how to call AVFoundation. They are the ones a lead has to defend across teams:
 
-- **Budgets are first-class inputs.** Decoder count, disk bytes and bitrate cap are explicit parameters with audits. A product request like "prefetch more on Wi-Fi" changes one number, and CI proves that no other device state got worse.
-- **A pure planner and a thin actor.** Every decision is a pure function of plain values (`PlannerInput → ReadinessPlan`), fuzzed with 5,000 random inputs. Only *applying* a plan touches concurrency. That split lets a platform team own the policy while a feature team owns the UI.
+- **Budgets are first-class inputs.** Decoder count, disk bytes and bitrate cap are explicit parameters with audits. A product request like "prefetch more on Wi-Fi" changes one number, and an audit in CI checks that the policy is still monotone: no worse device state gets a bigger window than a better one.
+- **A pure planner and a thin actor.** What should be playing, prepared and prefetched is a pure function of plain values (`PlannerInput → ReadinessPlan`), fuzzed with 5,000 random inputs. The actor only *applies* a plan. The few decisions it makes itself are about getting there safely: which decoder to pre-empt during a quality switch, when to fall back to break-before-make, which download to keep, and which failing key to stop retrying. That split lets a platform team own the policy while a feature team owns the UI.
 - **Monotonicity is a contract.** A window policy must never grow when conditions get worse. `PolicyAudit` checks all 96 combinations of discrete conditions, so the property survives future edits by people who never read this README.
 - **Failure modes are designed, not discovered.** These are handled explicitly and tested: flings, out-of-order completions, a port that always fails, a download that finishes after it was cancelled, a quality switch on the clip on screen, and losing the network mid-download.
 - **On-device learning where it pays.** A four-weight online model sets prefetch depth per user and per session. There is no server and no stored profile, and inputs are sanitised so NaN or infinity cannot poison it.
@@ -73,7 +73,7 @@ The port sees control commands in the order the engine decided them, one at a ti
 
 **3. Make before break on a quality switch.**
 A thermal or bandwidth downgrade changes the rendition of the clip on screen. The old decoder keeps playing until the new rendition's decoder is ready. Then the engine pauses the old one, plays the new one and releases the old one.
-A hand-off needs a second decoder for a moment. If the pool is full, the engine pre-empts the lowest-priority *ready* prepared decoder and re-prepares it once the hand-off completes. With a one-decoder budget there is nothing to pre-empt, so the engine falls back to break-before-make rather than stalling on the old rendition forever.
+A hand-off needs a second decoder for a moment. If the pool is full, the engine pre-empts the lowest-priority *ready* prepared decoder and re-prepares it once the hand-off completes. If the other decoders are still preparing, the hand-off waits for one of them to become ready rather than blanking the screen. With a one-decoder budget there is nothing to pre-empt, so the engine falls back to break-before-make rather than stalling on the old rendition forever. In that one case, if the new rendition's prepare then fails, nothing plays until the next swipe or condition change: failure suppression stops an immediate retry, and the old rendition is not restored.
 *Rejected:* release-then-prepare everywhere, which blanks the screen for one prepare on every quality change. That contradicts the whole point of downgrading, which is that a blurry frame costs less than a stall.
 
 **4. A slot returns to the pool only after `release` completes.**
@@ -102,7 +102,7 @@ A constant prefetch depth is wrong for both a skipper and a watcher. A server-si
 
 **10. Ports, not an AVFoundation dependency.**
 `PlayerPort` and `PrefetchTransport` keep the core building and fully tested on Linux. The doc comment on `PlayerPort` spells out what an `AVPlayer` adapter must do: set `preferredPeakBitRate` from the rendition, keep `preferredForwardBufferDuration` short, and wait for `.readyToPlay`.
-*Honest gap:* this package does **not** ship that AVFoundation adapter. The demo uses `SimulatedPlayer` and `SimulatedTransport`, which also check the port contract.
+*Honest gap:* this package does **not** ship that AVFoundation adapter. The demo uses `SimulatedPlayer` and `SimulatedTransport`. The simulated player also counts violations of the main clauses of the port contract; the doc comment on `PlayerPort` marks which clauses it checks.
 
 ## Usage
 
@@ -150,8 +150,8 @@ Run the tests with `swift test` (macOS or Linux, Swift 6.0+).
 
 ## Verification
 
-- **94 XCTest tests** across policy, ladder, predictor, pool, cache, planner, engine, fault injection, the simulated ports' own contract checks and the README snippets.
-- **Every engine guard has a test that runs without it.** `FeedEngine` has eight internal fault switches, reachable only through `@testable import`. Each one disables exactly one safeguard, and `EngineFaultTests` asserts that the guarding check then **fails**:
+- **98 XCTest tests** across policy, ladder, predictor, pool, cache, planner, engine, fault injection, engine guards, the simulated ports' own contract checks and the README snippets.
+- **Each of the eight fault switches has a test that runs without its guard.** `FeedEngine` has eight internal fault switches, reachable only through `@testable import`. Each one disables exactly one safeguard, and `EngineFaultTests` asserts that the guarding check then **fails**:
   - release-while-preparing: the port sees releases mid-prepare, decoders leak, and the hardware peak exceeds the budget;
   - unordered port commands: two clips play at once;
   - stale fetch completions accepted: late cancellations discard the re-requested downloads;
@@ -160,6 +160,11 @@ Run the tests with `swift test` (macOS or Linux, Swift 6.0+).
   - forgotten pool release: the books stop balancing, and `invariantViolations()` reports it;
   - no failure suppression: the engine never settles;
   - cancelling the landing clip's download: its bytes are gone.
+- **Four more safeguards have tests that a one-line mutation breaks** (`EngineGuardTests`). The final independent review found that the rest of the suite let these four mutations through:
+  - a hand-off pre-empts the lowest-priority prepared decoder, not the next clip;
+  - while the other decoders are still preparing, a hand-off waits instead of breaking playback;
+  - a cancelled top-up keeps the bytes already on disk;
+  - a failed top-up keeps them too.
 - **The checkers are tested too.**
   - `SimulatedPortTests` drives the simulated player with contract violations (commands to released, never-prepared and failed players; a release during prepare; two clips playing) and asserts each counter counts. The engine tests' `== 0` assertions on those counters therefore mean something.
   - The two fault tests above show `invariantViolations()` can report.
@@ -168,15 +173,19 @@ Run the tests with `swift test` (macOS or Linux, Swift 6.0+).
   - a naive ladder that flaps at least 50 times on the oscillation trace;
   - a sign-flipped learning rule that fails both of the predictor's thresholds;
   - ten hand-broken plans that `ReadinessInvariants` must reject, plus two offline ones.
-- **Timing-sensitive engine tests use gates, not sleeps.** The simulated player can hold prepares and the test transport holds fetches at a gate, so "the old rendition plays until the new one is ready" and "a late completion arrives after the re-request" are exact orderings, not races. Time-based behaviour uses a manual clock.
+- **The orderings that matter most are gated, not timed.** The simulated player can hold prepares and the test transport holds fetches at a gate, so "the old rendition plays until the new one is ready" and "a late completion arrives after the re-request" are exact orderings, not races. Time-based behaviour uses a manual clock. Other engine tests still rely on short simulated latencies (30–80 ms) to land a swipe inside a prepare or a release. Those were stress-tested on a saturated CPU (below) and did not flake.
 - **The cache is checked against a reference model**: 3,000 random reserve/touch/shrink/remove/pin operations, comparing victims and entry sets, not just the budget.
-- **36 hand-made source mutations, all killed by the final suite.** Six of them first survived or hung, and each got the test that now kills it:
+- **40 hand-made source mutations, all killed by the final suite.** Ten of them first survived or hung, and each got the test that now kills it:
   - planner ignoring spare decoders;
   - a re-wanted lease still being released;
   - a releasing slot being handed out again;
   - missing failure suppression (it hung the suite);
   - cached window positions left unpinned;
-  - completed downloads not checking the dwell timer.
+  - completed downloads not checking the dwell timer;
+  - a hand-off pre-empting the next clip instead of the lowest-priority one;
+  - break-before-make while the other decoders were only preparing;
+  - a cancelled top-up shrinking to zero;
+  - a failed top-up shrinking to zero.
 - **No crash paths through the public API.**
   - No force-unwraps, `try!` or `as!`.
   - Every subscript is bounds-guarded or provably in range, with a comment where it matters.
@@ -191,7 +200,7 @@ CI runs on pushes to `main` and on pull requests ([Actions](https://github.com/r
 | Linux (`swift:6.1` container) | `rm -rf .build`, then a clean `swift build --build-tests -Xswiftc -warnings-as-errors`, then `swift test` |
 | macOS (`macos-15`) | The same clean warnings-as-errors build and `swift test`, then `xcodebuild` of the package for `generic/platform=iOS Simulator` with `SWIFT_TREAT_WARNINGS_AS_ERRORS=YES` |
 
-Result on this code, from the first push onwards: Linux **94/94 tests**, and macOS (Xcode 16.4, Swift 6.1.2) **94/94 tests plus the iOS Simulator build**, both green.
+Every push to `main` has been green on both jobs. On the current code: Linux **98/98 tests**, and macOS (Xcode 16.4, Swift 6.1.2) **98/98 tests plus the iOS Simulator build**. The `v1.0.0` tag ran the first 94; `EngineGuardTests` and a doc-comment correction in `Ports.swift` came after it, with no change to library behaviour.
 
 Before the first push, locally on Linux with Swift 6.1.2:
 
@@ -199,11 +208,16 @@ Before the first push, locally on Linux with Swift 6.1.2:
 - 94/94 tests passing, repeated five times, including twice with both CPU cores saturated;
 - the engine, fault and port tests repeated another 40 times, 15 of them with three busy loops on two cores, with no flakes.
 
+After the final review, locally:
+
+- each of the four `EngineGuardTests` passes on the shipped code and fails on the mutation it was written for;
+- the engine, fault and guard tests repeated 15 more times with three busy loops on two cores, with no flakes.
+
 **What has not been verified:**
 
 - No real `AVPlayer` has been driven by this engine; there is no AVFoundation adapter in the package.
 - The decoder budget of 4 is an illustrative default, not a measured device limit.
-- The demo app has run on an iOS Simulator only in CI: a GitHub-hosted `macos-15` runner builds it against this package's `1.0.0` tag, launches it in six scenarios, checks that it is still running after each one, and takes the screenshots shown in its README. It has not been run on a physical device, or on a Simulator on the author's own Mac.
+- The demo app has run on an iOS Simulator only in CI: a GitHub-hosted `macos-15` runner builds it against this package's `1.0.0` tag, launches it in six scenarios, checks that it is still running after each one, and takes the screenshots shown in its README. It has not been run on a physical device, or on a Simulator on the author's own Mac. That local run was planned and skipped: Xcode and the Simulator on that Mac already had unrelated work open, and running the demo there would have meant clicking through it. The CI run replaces it.
 
 ## Layout
 
@@ -221,7 +235,7 @@ Sources/FeedReadiness/
   Simulation.swift       SimulatedPlayer / SimulatedTransport (contract-checking doubles)
   Clock.swift            FeedClock (injected time for the ladder's dwell)
   Arithmetic.swift       saturating helpers
-Tests/FeedReadinessTests/  94 tests
+Tests/FeedReadinessTests/  98 tests
 ```
 
 MIT licensed.
