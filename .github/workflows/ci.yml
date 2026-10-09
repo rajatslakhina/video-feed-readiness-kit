@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     container: swift:6.1
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Clean build, warnings are errors
         run: rm -rf .build && swift build --build-tests -Xswiftc -warnings-as-errors
       - name: Tests
@@ -29,7 +29,7 @@ jobs:
     name: macOS · swift test + iOS Simulator build
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Toolchain
         run: xcodebuild -version && swift --version
       - name: Clean build, warnings are errors
