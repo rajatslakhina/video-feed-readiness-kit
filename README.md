@@ -191,6 +191,8 @@ CI runs on pushes to `main` and on pull requests ([Actions](https://github.com/r
 | Linux (`swift:6.1` container) | `rm -rf .build`, then a clean `swift build --build-tests -Xswiftc -warnings-as-errors`, then `swift test` |
 | macOS (`macos-15`) | The same clean warnings-as-errors build and `swift test`, then `xcodebuild` of the package for `generic/platform=iOS Simulator` with `SWIFT_TREAT_WARNINGS_AS_ERRORS=YES` |
 
+Result on this code, from the first push onwards: Linux **94/94 tests**, and macOS (Xcode 16.4, Swift 6.1.2) **94/94 tests plus the iOS Simulator build**, both green.
+
 Before the first push, locally on Linux with Swift 6.1.2:
 
 - clean build with warnings as errors: 0 warnings;
