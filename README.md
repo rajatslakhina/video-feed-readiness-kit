@@ -5,7 +5,7 @@
 [![CI](https://github.com/rajatslakhina/video-feed-readiness-kit/actions/workflows/ci.yml/badge.svg)](https://github.com/rajatslakhina/video-feed-readiness-kit/actions/workflows/ci.yml)
 ![Swift 6](https://img.shields.io/badge/Swift-6.0%2B-orange) ![Platforms](https://img.shields.io/badge/platforms-iOS%2017%20%7C%20macOS%2014%20%7C%20Linux-blue) ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 
-Demo app: (link added once the companion repo is pushed)
+Demo app: **[video-feed-readiness-kit-demo-app](https://github.com/rajatslakhina/video-feed-readiness-kit-demo-app)**, a SwiftUI console that consumes this package as a remote dependency pinned to the `1.0.0` release. Its README has screenshots from an iOS Simulator run in CI.
 
 ---
 
@@ -203,7 +203,7 @@ Before the first push, locally on Linux with Swift 6.1.2:
 
 - No real `AVPlayer` has been driven by this engine; there is no AVFoundation adapter in the package.
 - The decoder budget of 4 is an illustrative default, not a measured device limit.
-- At this release, the demo app has not been launched on any Simulator or device. Only its view-model has been run, headless on Linux against this package.
+- The demo app has run on an iOS Simulator only in CI: a GitHub-hosted `macos-15` runner builds it against this package's `1.0.0` tag, launches it in six scenarios, checks that it is still running after each one, and takes the screenshots shown in its README. It has not been run on a physical device, or on a Simulator on the author's own Mac.
 
 ## Layout
 
